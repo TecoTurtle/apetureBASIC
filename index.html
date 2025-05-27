@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>apetureBASIC</title>
+<style>
+  body {
+    background: black;
+    color: #0f0;
+    font-family: monospace;
+    margin: 0; padding: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #terminal {
+    flex-grow: 1;
+    padding: 10px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #input-container {
+    display: flex;
+    background: #000;
+    padding: 5px 10px;
+  }
+  #prompt {
+    padding-right: 5px;
+    user-select: none;
+  }
+  #input {
+    background: black;
+    color: #0f0;
+    border: none;
+    outline: none;
+    font-family: monospace;
+    font-size: 1em;
+    flex-grow: 1;
+    resize: none;
+    height: 4em;
+    line-height: 1.2em;
+  }
+  #instructions {
+    font-size: 0.8em;
+    color: #060;
+    padding: 5px 10px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+  <div id="terminal"></div>
+
+  <div id="instructions">Type or paste multiple lines. Press Ctrl+Enter to run.</div>
+
+  <div id="input-container">
+    <div id="prompt">&gt;</div>
+    <textarea id="input" autocomplete="off" spellcheck="false" autofocus></textarea>
+  </div>
+
+<script>
+(async () => {
+  const terminal = document.getElementById('terminal');
+  const input = document.getElementById('input');
+  const promptEl = document.getElementById('prompt');
+
+  const program = new Map();
+  let vars = {};
+  let running = false;
+  let lineNumbers = [];
+  let lineIndex = 0;
+
+  async function printLine(text = '') {
+    terminal.textContent += text + '\n';
+    terminal.scrollTop = terminal.scrollHeight;
+    // Small delay to allow rendering smoothly
+    await new Promise(r => setTimeout(r, 5));
+  }
+
+  function parseProgramLine(line) {
+    const parts = line.trim().split(' ');
+    const ln = parseInt(parts[0], 10);
+    if (isNaN(ln)) return null;
+    const code = line.trim().slice(parts[0].length).trim();
+    return { lineNum: ln, code };
+  }
+
+  function evalExpr(expr) {
+    expr = expr.replace(/[A-Za-z]\w*/g, name => vars[name] ?? 0);
+    if (!/^[0-9+\-*/(). ]*$/.test(expr)) {
+      throw 'Invalid expression: ' + expr;
+    }
+    return Function('"use strict"; return (' + expr + ')')();
+  }
+
+  function waitForInput(promptText) {
+    return new Promise(resolve => {
+      promptEl.textContent = promptText;
+      input.value = '';
+      input.focus();
+
+      function onKey(e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const val = input.value.trim();
+        input.value = '';
+        input.removeEventListener('keydown', onKey);
+        promptEl.textContent = '>';
+        printLine(promptText + ' ' + val);
+        resolve(val);
+      }
+      input.addEventListener('keydown', onKey);
+    });
+  }
+
+  async function execLine(code) {
+    await printLine('> ' + code);
+    const tokens = code.trim().split(' ');
+    if (!tokens[0]) return;
+    const cmd = tokens[0].toUpperCase();
+
+    switch (cmd) {
+      case 'PRINT': {
+        let arg = code.slice(6).trim();
+        if (arg.startsWith('"') && arg.endsWith('"')) {
+          await printLine(arg.slice(1, -1));
+        } else {
+          try {
+            await printLine(evalExpr(arg));
+          } catch (e) {
+            await printLine('ERROR: ' + e);
+          }
+        }
+        break;
+      }
+      case 'LET': {
+        const rest = code.slice(3).trim();
+        const [name, expr] = rest.split('=').map(s => s.trim());
+        if (!expr) {
+          await printLine('SYNTAX ERROR');
+          break;
+        }
+        try {
+          vars[name] = evalExpr(expr);
+        } catch (e) {
+          await printLine('ERROR: ' + e);
+        }
+        break;
+      }
+      case 'INPUT': {
+        if (tokens.length < 2) {
+          await printLine('SYNTAX ERROR');
+          break;
+        }
+        const varName = tokens[1];
+        const userIn = await waitForInput('?');
+        const num = Number(userIn);
+        vars[varName] = isNaN(num) ? userIn : num;
+        break;
+      }
+      case 'GOTO': {
+        if (tokens.length < 2) {
+          await printLine('SYNTAX ERROR');
+          break;
+        }
+        const target = parseInt(tokens[1], 10);
+        const idx = lineNumbers.indexOf(target);
+        if (idx === -1) {
+          await printLine('LINE NUMBER ERROR');
+        } else {
+          lineIndex = idx - 1;
+        }
+        break;
+      }
+      case 'IF': {
+        const thenPos = tokens.findIndex(t => t.toUpperCase() === 'THEN');
+        if (thenPos < 3) {
+          await printLine('SYNTAX ERROR');
+          break;
+        }
+        let condition = tokens.slice(1, thenPos).join(' ')
+          .replace(/[A-Za-z]\w*/g, v => vars[v] ?? 0)
+          .replace(/=/g, '==');
+        let result;
+        try {
+          result = Function('"use strict"; return (' + condition + ')')();
+        } catch {
+          await printLine('SYNTAX ERROR');
+          break;
+        }
+        if (result) {
+          const tgt = parseInt(tokens[thenPos + 1], 10);
+          const idx = lineNumbers.indexOf(tgt);
+          if (idx === -1) {
+            await printLine('LINE NUMBER ERROR');
+          } else {
+            lineIndex = idx - 1;
+          }
+        }
+        break;
+      }
+      case 'END':
+        running = false;
+        break;
+      case 'CLS':
+        terminal.textContent = '';
+        break;
+      case 'LIST':
+        for (let ln of lineNumbers) {
+          await printLine(ln + ' ' + program.get(ln));
+        }
+        break;
+      case 'RUN':
+        if (program.size === 0) {
+          await printLine('NO PROGRAM');
+        } else {
+          running = true;
+          vars = {};
+          lineNumbers = Array.from(program.keys()).sort((a, b) => a - b);
+          lineIndex = 0;
+          while (running && lineIndex < lineNumbers.length) {
+            const ln = lineNumbers[lineIndex];
+            await execLine(program.get(ln));
+            lineIndex++;
+          }
+        }
+        break;
+      case 'CLEAR':
+        program.clear();
+        vars = {};
+        terminal.textContent = '';
+        await printLine('PROGRAM CLEARED');
+        break;
+      default:
+        await printLine('UNKNOWN COMMAND');
+    }
+  }
+
+  // Ctrl+Enter submits multiple lines
+  input.addEventListener('keydown', async e => {
+    if (e.key === 'Enter' && e.ctrlKey) {
+      e.preventDefault();
+      const lines = input.value.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+      input.value = '';
+      for (const line of lines) {
+        const progLine = parseProgramLine(line);
+        if (progLine) {
+          if (!progLine.code) {
+            if (program.has(progLine.lineNum)) {
+              program.delete(progLine.lineNum);
+              await printLine('Deleted line ' + progLine.lineNum);
+            }
+          } else {
+            program.set(progLine.lineNum, progLine.code);
+            await printLine('Saved line ' + progLine.lineNum);
+          }
+        } else {
+          await execLine(line);
+        }
+      }
+    }
+  });
+
+  await printLine('apetureBASIC');
+  await printLine('Paste/type multiple lines, then press Ctrl+Enter to execute.');
+})();
+</script>
+
+</body>
+</html>
